@@ -1,0 +1,21 @@
+# Static capability discipline for downstream coroutine code:
+# Application tasks must perform all filesystem and process operations through
+# `coroutine_sandbox::Workspace` rather than ambient host `std::fs` / `tokio::fs` / `Command`.
+
+disallowed-types = [
+    { path = "std::fs::File", reason = "ambient host file access bypasses sandbox capabilities; use `coroutine_sandbox::Workspace`" },
+    { path = "tokio::fs::File", reason = "ambient host file access bypasses sandbox capabilities; use `Workspace::open_read` / `Workspace::open_write`" },
+    { path = "std::process::Command", reason = "ambient host process spawning bypasses bwrap; use `Workspace::exec`" },
+    { path = "tokio::process::Command", reason = "ambient host process spawning bypasses bwrap; use `Workspace::exec`" },
+]
+
+disallowed-methods = [
+    { path = "std::fs::read", reason = "use `Workspace::read`" },
+    { path = "std::fs::read_to_string", reason = "use `Workspace::read`" },
+    { path = "std::fs::write", reason = "use `Workspace::write`" },
+    { path = "std::fs::read_dir", reason = "use `Workspace::list`" },
+    { path = "tokio::fs::read", reason = "use `Workspace::read`" },
+    { path = "tokio::fs::read_to_string", reason = "use `Workspace::read`" },
+    { path = "tokio::fs::write", reason = "use `Workspace::write`" },
+    { path = "tokio::fs::read_dir", reason = "use `Workspace::list`" },
+]
