@@ -95,7 +95,7 @@ where
     let remaining = AtomicUsize::new(max_payload);
 
     let io_and_wait = async {
-        let (_bwrap_status, out, err, status_text) = tokio::try_join!(
+        let (bwrap_status, out, err, status_text) = tokio::try_join!(
             child.wait(),
             read_capped(stdout, &remaining),
             read_capped(stderr, &remaining),
@@ -110,7 +110,7 @@ where
             });
         }
 
-        Err(classify_bwrap_failure(&err))
+        Err(classify_bwrap_failure(bwrap_status, &status_text, &err))
     };
 
     match tokio::time::timeout(timeout, io_and_wait).await {
@@ -186,7 +186,11 @@ fn parse_exit_code(status_json: &str) -> Option<i32> {
     None
 }
 
-fn classify_bwrap_failure(stderr: &[u8]) -> io::Error {
+fn classify_bwrap_failure(
+    bwrap_status: std::process::ExitStatus,
+    status_text: &str,
+    stderr: &[u8],
+) -> io::Error {
     let msg = String::from_utf8_lossy(stderr).trim().to_string();
     let kind = if msg.contains("No such file or directory") {
         io::ErrorKind::NotFound
@@ -198,7 +202,10 @@ fn classify_bwrap_failure(stderr: &[u8]) -> io::Error {
     io::Error::new(
         kind,
         if msg.is_empty() {
-            "bwrap failed before starting command".to_string()
+            format!(
+                "bwrap failed before starting command ({bwrap_status}, status={:?})",
+                status_text.trim()
+            )
         } else {
             msg
         },
