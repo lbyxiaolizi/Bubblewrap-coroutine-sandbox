@@ -144,12 +144,21 @@ async fn read_capped(
         if n == 0 {
             return Ok(buf);
         }
-        remaining
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |left| {
-                left.checked_sub(n)
-            })
-            .map_err(|_| io::Error::from_raw_os_error(libc::EFBIG))?;
+        reserve_budget(remaining, n)?;
         buf.extend_from_slice(&chunk[..n]);
+    }
+}
+
+fn reserve_budget(remaining: &AtomicUsize, n: usize) -> io::Result<()> {
+    let mut left = remaining.load(Ordering::Relaxed);
+    loop {
+        let next = left
+            .checked_sub(n)
+            .ok_or_else(|| io::Error::from_raw_os_error(libc::EFBIG))?;
+        match remaining.compare_exchange_weak(left, next, Ordering::Relaxed, Ordering::Relaxed) {
+            Ok(_) => return Ok(()),
+            Err(observed) => left = observed,
+        }
     }
 }
 
