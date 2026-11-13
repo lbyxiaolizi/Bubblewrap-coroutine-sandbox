@@ -60,15 +60,16 @@ where
         .map(|a| a.as_ref().to_os_string())
         .collect();
 
-    // `dir_fd` and `domain_permit` move into `spawn_blocking` so cancelling the
-    // outer future while the spawn is queued cannot close `dir_fd` early or
-    // release the concurrency slot before `spawn()` returns.
-    let (mut child, status_rx, _held_permit) =
-        tokio::task::spawn_blocking(move || -> io::Result<_> {
+    // Spawn on `layout`'s dedicated persistent thread (not `spawn_blocking`,
+    // whose 10s idle thread exit would fire `bwrap --die-with-parent`), while
+    // keeping `layout` alive for the full duration of `run_oneshot`.
+    let layout_for_spawn = Arc::clone(&layout);
+    let (mut child, status_rx, _held_permit) = layout
+        .run_spawn(move || -> io::Result<_> {
             let (status_tx, status_rx) = pipe::pipe()?;
             let status_fd = status_tx.into_blocking_fd()?;
-            let seccomp_fd = layout.make_exec_seccomp_fd()?;
-            let mut cmd = layout.oneshot_exec_command(
+            let seccomp_fd = layout_for_spawn.make_exec_seccomp_fd()?;
+            let mut cmd = layout_for_spawn.oneshot_exec_command(
                 dir_fd.as_raw_fd(),
                 access,
                 status_fd.as_raw_fd(),
@@ -87,8 +88,8 @@ where
             drop(dir_fd);
             Ok((child, status_rx, domain_permit))
         })
-        .await
-        .map_err(|err| io::Error::other(format!("exec spawn task panicked: {err}")))??;
+        .await?;
+    let _keep_spawner_alive = layout;
 
     let stdout = child.stdout.take().expect("stdout piped");
     let stderr = child.stderr.take().expect("stderr piped");

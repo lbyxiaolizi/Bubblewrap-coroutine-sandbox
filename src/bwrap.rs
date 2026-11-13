@@ -4,12 +4,15 @@ use std::ffi::{OsStr, OsString};
 use std::io;
 use std::os::fd::{OwnedFd, RawFd};
 use std::path::PathBuf;
+use std::sync::{mpsc, LazyLock};
 
 use tokio::process::Command;
+use tokio::sync::oneshot;
 
 use crate::seccomp;
 
 pub(crate) const WORK_DIR: &str = "/work";
+type SpawnJob = Box<dyn FnOnce() + Send>;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Access {
@@ -30,6 +33,7 @@ pub(crate) struct BwrapLayout {
     bwrap: PathBuf,
     sys_args: Vec<OsString>,
     exec_seccomp_bpf: Vec<u8>,
+    spawner: LazyLock<io::Result<mpsc::Sender<SpawnJob>>>,
 }
 
 impl BwrapLayout {
@@ -57,7 +61,35 @@ impl BwrapLayout {
             bwrap,
             sys_args,
             exec_seccomp_bpf: seccomp::default_exec_bpf_bytes(),
+            spawner: LazyLock::new(start_spawner_thread),
         })
+    }
+
+    /// Runs `op` on a dedicated spawner thread whose lifetime matches this
+    /// `BwrapLayout` (unlike `tokio::task::spawn_blocking`, whose threads exit
+    /// after 10s idle and would trigger `bwrap --die-with-parent`'s `PDEATHSIG`
+    /// mid-execution on commands running longer than 10s).
+    pub(crate) async fn run_spawn<T, F>(&self, op: F) -> io::Result<T>
+    where
+        T: Send + 'static,
+        F: FnOnce() -> io::Result<T> + Send + 'static,
+    {
+        let tx = self
+            .spawner
+            .as_ref()
+            .map_err(|e| io::Error::new(e.kind(), e.to_string()))?;
+
+        let rt = tokio::runtime::Handle::current();
+        let (done_tx, done_rx) = oneshot::channel();
+        let job: SpawnJob = Box::new(move || {
+            let _guard = rt.enter();
+            let _ = done_tx.send(op());
+        });
+        tx.send(job)
+            .map_err(|_| io::Error::other("bwrap spawner thread exited"))?;
+        done_rx
+            .await
+            .map_err(|_| io::Error::other("bwrap spawner dropped job"))?
     }
 
     pub(crate) fn make_exec_seccomp_fd(&self) -> io::Result<Option<OwnedFd>> {
@@ -109,6 +141,18 @@ impl BwrapLayout {
         inherit_fds(&mut cmd, &inherited);
         cmd
     }
+}
+
+fn start_spawner_thread() -> io::Result<mpsc::Sender<SpawnJob>> {
+    let (tx, rx) = mpsc::channel::<SpawnJob>();
+    std::thread::Builder::new()
+        .name("cs-bwrap-spawner".into())
+        .spawn(move || {
+            while let Ok(job) = rx.recv() {
+                job();
+            }
+        })
+        .map(|_| tx)
 }
 
 pub(crate) fn inherit_fds(cmd: &mut Command, fds: &[RawFd]) {
