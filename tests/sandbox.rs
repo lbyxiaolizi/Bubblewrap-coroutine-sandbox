@@ -129,9 +129,10 @@ async fn each_task_reaches_only_its_own_directory() {
                 .unwrap()
                 .contains(&own_file.into_os_string()));
 
+            // Prune `/usr` (tens of GB on CI images) and `/proc`; check every other path in `/`.
             let found = sh(
                 &ws,
-                "find / -name secret.txt -not -path '/proc/*' 2>/dev/null",
+                "find / -path /usr -prune -o -path /proc -prune -o -name secret.txt -print",
             )
             .await;
             assert_eq!(text(&found.stdout), "/work/secret.txt");
