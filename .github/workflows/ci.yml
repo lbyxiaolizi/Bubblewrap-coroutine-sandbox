@@ -1,0 +1,41 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install bubblewrap and enable unprivileged userns
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends bubblewrap
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+
+      - name: Set up Rust stable toolchain
+        run: |
+          rustup toolchain install stable --profile minimal \
+            --component rustfmt,clippy \
+            --target aarch64-unknown-linux-gnu
+          rustup default stable
+
+      - name: Format, clippy, unit tests, and bubblewrap integration tests
+        run: ./scripts/verify-linux.sh
+
+      - name: Cross-check aarch64 Linux clippy
+        run: cargo clippy --locked --target aarch64-unknown-linux-gnu --all-targets -- -D warnings
+
+      - name: Run demo smoke test
+        run: |
+          d=$(mktemp -d)
+          trap 'rm -rf "$d"' EXIT
+          cargo run --locked --example demo -- "$d"
